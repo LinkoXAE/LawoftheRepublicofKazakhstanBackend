@@ -1,16 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import Developers from './Developers';
 import './App.css';
-import { analyzeText } from './api'; // Используем существующий api.ts
+import { searchAdilet, fetchDocument, analyzeText, checkOnline } from './api';
 
-// --- КОНФИГУРАЦИЯ ---
-// В Electron production backend всегда на localhost:3000
 const LOCAL_API = 'http://localhost:3000/api'; 
-const { ipcRenderer } = window.require('electron');
 
-// --- ИСПРАВЛЕННАЯ ФУНКЦИЯ ЗАГРУЗКИ ДОКУМЕНТА ---
 async function openDocument(link: string, setSelectedDoc: (data: any) => void) {
-  // Исправлено: URL теперь ведет на /api/document
   try {
     const res = await fetch(
       `${LOCAL_API}/document?url=${encodeURIComponent(link)}`
@@ -21,7 +16,6 @@ async function openDocument(link: string, setSelectedDoc: (data: any) => void) {
     }
     const data = await res.json();
     
-    // Проверка данных
     if (!data || !data.text) {
       setSelectedDoc({ error: 'Текст документа пуст или не распознан' });
       return;
@@ -32,17 +26,6 @@ async function openDocument(link: string, setSelectedDoc: (data: any) => void) {
   }
 }
 
-// --- ИСПРАВЛЕННАЯ ФУНКЦИЯ ПОИСКА ---
-const searchAdilet = async (query: string) => {
-  // Исправлено: URL теперь ведет на /api/search
-  const res = await fetch(`${LOCAL_API}/search?q=${encodeURIComponent(query)}`);
-  if (!res.ok) throw new Error('Ошибка запроса к backend');
-  // Backend теперь возвращает массив напрямую, а не объект { results: [] }
-  const data = await res.json();
-  return { results: data }; // Адаптируем под ожидание фронта
-};
-
-// --- ТИПЫ (Оставлены без изменений) ---
 type ViewType = 'laws' | 'codes' | 'npa' | 'intl' | 'search' | 'conflict' | 'history' | 'developers';
 type DocStatus = 'active' | 'void' | 'project';
 type LangType = 'ru' | 'kk' | 'en';
@@ -261,12 +244,11 @@ const dbService = {
 };
 
 function App() {
-  // Для проверки онлайна используем простую функцию, если IPC недоступен в dev-режиме браузера
   const [isOnline, setIsOnline] = useState<boolean | null>(true); 
   const [currentView, setCurrentView] = useState<ViewType>('laws');
   const [lang, setLang] = useState<LangType>('ru');
   const [filterYear, setFilterYear] = useState<number | null>(null);
-  const [selectedDoc, setSelectedDoc] = useState<any | null>(null); // any для совместимости с ответом бэка
+  const [selectedDoc, setSelectedDoc] = useState<any | null>(null);
   const [theme, setTheme] = useState<ThemeType>(() => {
     return (localStorage.getItem('app_theme') as ThemeType) || 'light';
   });
@@ -281,13 +263,16 @@ function App() {
   const [historyList, setHistoryList] = useState<LogEntry[]>([]);
 
   useEffect(() => {
-    // Безопасная проверка IPC (чтобы не падало в браузере)
-    if (ipcRenderer) {
-        ipcRenderer.send('check-online');
-        ipcRenderer.on('online-status', (event: any, status: boolean) => {
-            setIsOnline(status);
-        });
-    }
+    setIsOnline(navigator.onLine);
+    const handleStatusChange = () => {
+      setIsOnline(navigator.onLine);
+    };
+    window.addEventListener('online', handleStatusChange);
+    window.addEventListener('offline', handleStatusChange);
+    return () => {
+      window.removeEventListener('online', handleStatusChange);
+      window.removeEventListener('offline', handleStatusChange);
+    };
   }, []);
 
   useEffect(() => {
@@ -340,7 +325,12 @@ function App() {
   };
   
   const handleSearch = async () => {
-    if (!searchQuery.trim()) return;
+    if (!searchQuery.trim()) {
+      setHasSearched(false);
+      setSearchResults([]);
+      return;
+    }
+
     setIsLoading(true);
     setHasSearched(false);
     setSearchResults([]);
@@ -348,7 +338,7 @@ function App() {
       dbService.saveLog(searchQuery, 'general');
       const data = await searchAdilet(searchQuery);
       setSearchResults(
-        (data.results || []).map((item: any, idx: number) => ({
+        (Array.isArray(data) ? data : []).map((item: any, idx: number) => ({
           id: idx + 1,
           type: 'npa',
           num: '',
@@ -357,7 +347,7 @@ function App() {
           title: item.title,
           org: 'adilet.zan.kz',
           status: 'active',
-          desc: item.snippet || '',
+          desc: item.desc || '',
           link: item.link
         }))
       );
@@ -365,60 +355,47 @@ function App() {
       alert('Ошибка поиска: ' + e.message);
       setSearchResults([]);
     } finally {
-      setHasSearched(true);
       setIsLoading(false);
+      setHasSearched(true);
     }
   };
   
   const handleConflictAnalyze = async () => {
     if (!conflictQuery.trim()) return;
     
-    if(ipcRenderer) ipcRenderer.send('check-online');
+    if (!navigator.onLine) {
+        alert('ОШИБКА: Нет подключения к интернету. Поиск невозможен.');
+        return;
+    }
     
-    const runAnalysis = async () => {
-        setIsAnalyzing(true);
-        setHasAnalyzed(false);
+    setIsAnalyzing(true);
+    setHasAnalyzed(false);
+    setConflictResults([]);
+    try {
+        dbService.saveLog(conflictQuery, 'conflict_check');
+        const data = await analyzeText(conflictQuery);
+        if (Array.isArray(data) && data.length > 0) {
+        const mappedResults: LawDocument[] = data.map((item: any, index: number) => ({
+            id: Date.now() + index,
+            type: 'npa',
+            num: 'Интернет',
+            date: new Date().toLocaleDateString(),
+            year: new Date().getFullYear(),
+            title: item.title,
+            org: 'ИПС "Әділет" (adilet.zan.kz)',
+            status: 'active',
+            desc: item.desc,
+            link: item.link
+        }));
+        setConflictResults(mappedResults);
+        } else {
         setConflictResults([]);
-        try {
-          dbService.saveLog(conflictQuery, 'conflict_check');
-          const data = await analyzeText(conflictQuery);
-          if (data.conflicts && data.conflicts.length > 0) {
-            const mappedResults: LawDocument[] = data.conflicts.map((c: any, index: number) => ({
-              id: Date.now() + index,
-              type: 'npa',
-              num: 'Интернет',
-              date: new Date().toLocaleDateString(),
-              year: new Date().getFullYear(),
-              title: c.opposing_norm ? c.opposing_norm.npa_name : c.conflict_type,
-              org: 'ИПС "Әділет" (adilet.zan.kz)',
-              status: 'active',
-              desc: c.legal_explanation,
-              link: c.opposing_norm?.link
-            }));
-            setConflictResults(mappedResults);
-          } else {
-            setConflictResults([]);
-          }
-        } catch (error) {
-          alert('Ошибка связи с сервером! (Подождите 5-10 сек после запуска)');
-        } finally {
-          setHasAnalyzed(true);
-          setIsAnalyzing(false);
         }
-    };
-
-    // Если есть IPC, ждем подтверждения
-    if (ipcRenderer) {
-        ipcRenderer.once('online-status', async (event: any, isOnline: boolean) => {
-            if (!isOnline) {
-                alert('ОШИБКА: Нет подключения к интернету. Поиск невозможен.');
-                return;
-            }
-            runAnalysis();
-        });
-    } else {
-        // Fallback для браузера
-        runAnalysis();
+    } catch (error) {
+        alert('Ошибка связи с сервером! (Подождите 5-10 сек после запуска)');
+    } finally {
+        setIsAnalyzing(false);
+        setHasAnalyzed(true);
     }
   };
   
@@ -611,9 +588,9 @@ function App() {
                 </button>
               </div>
               <div className="data-panel">
-                {!hasSearched ? (
+                {!isLoading && !hasSearched ? (
                   <div style={{ padding: 40, textAlign: 'center', color: 'var(--text-secondary)' }}>{t('msg_search_start')}</div>
-                ) : searchResults.length === 0 ? (
+                ) : !isLoading && hasSearched && searchResults.length === 0 ? (
                   <div style={{ padding: 40, textAlign: 'center', color: 'var(--text-secondary)' }}>{t('msg_search_empty')}</div>
                 ) : (
                   <table>
@@ -757,7 +734,6 @@ function App() {
                   )}
                   {selectedDoc.info && <div dangerouslySetInnerHTML={{__html: selectedDoc.info}}></div>}
                 </div>
-                {/* Рендер HTML контента */}
                 <div style={{ textAlign: 'justify', fontSize: 16, marginBottom: 24, padding: 16, borderRadius: 4 }}>
                   {selectedDoc.text ? (
                       <div className="law-content" dangerouslySetInnerHTML={{__html: selectedDoc.text}} />

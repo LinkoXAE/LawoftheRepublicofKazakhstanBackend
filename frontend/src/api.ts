@@ -25,3 +25,11 @@ export const fetchDocument = async (url: string) => {
     throw error;
   }
 };
+
+export const analyzeText = async (text: string) => {
+  return searchAdilet(text);
+};
+
+export const checkOnline = async () => {
+  return navigator.onLine;
+};
