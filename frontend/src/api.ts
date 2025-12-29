@@ -1,35 +1,27 @@
-import axios from 'axios';
+import { LOCAL_API } from './config';
 
-const API_URL = 'http://localhost:3000/api';
+export async function getDocument(url: string) {
+  const res = await fetch(
+    `${LOCAL_API}/document?url=${encodeURIComponent(url)}`
+  );
+  if (!res.ok) throw new Error('Ошибка сервера');
+  return res.json();
+}
 
-export const searchAdilet = async (query: string) => {
-  try {
-    const response = await axios.get(`${API_URL}/search`, {
-      params: { q: query }
-    });
-    return response.data;
-  } catch (error) {
-    console.error('Search API Error:', error);
-    throw error;
-  }
-};
+export async function searchAdilet(q: string) {
+  const res = await fetch(`${LOCAL_API}/search?q=${encodeURIComponent(q)}`);
+  return res.json();
+}
 
-export const fetchDocument = async (url: string) => {
-  try {
-    const response = await axios.get(`${API_URL}/document`, {
-      params: { url }
-    });
-    return response.data;
-  } catch (error) {
-    console.error('Document API Error:', error);
-    throw error;
-  }
-};
+export async function analyzeText(text: string) {
+  const res = await fetch(`${LOCAL_API}/analyze`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text }),
+  });
+  return res.json();
+}
 
-export const analyzeText = async (text: string) => {
-  return searchAdilet(text);
-};
-
-export const checkOnline = async () => {
+export function checkOnline() {
   return navigator.onLine;
-};
+}
